@@ -24,17 +24,8 @@ import (
 	"github.com/google/blueprint/proptools"
 )
 
-// TODO(b/267229066): Remove globalAfdoProfileProjects after implementing bp2build converter for fdo_profile
-var (
-	globalAfdoProfileProjects = []string{
-		"vendor/google_data/pgo_profile/sampling/",
-		"toolchain/pgo-profiles/sampling/",
-	}
-)
-
-var afdoProfileProjectsConfigKey = android.NewOnceKey("AfdoProfileProjects")
-
-const afdoCFlagsFormat = "-fprofile-sample-use=%s"
+// This flag needs to be in both CFlags and LdFlags to ensure correct symbol ordering
+const afdoFlagsFormat = "-fprofile-sample-use=%s -fprofile-sample-accurate"
 
 func recordMissingAfdoProfileFile(ctx android.BaseModuleContext, missing string) {
 	getNamedMapForConfig(ctx.Config(), modulesMissingProfileFileKey).Store(missing, true)
@@ -61,6 +52,13 @@ type afdo struct {
 
 func (afdo *afdo) props() []interface{} {
 	return []interface{}{&afdo.Properties}
+}
+
+func (afdo *afdo) begin(ctx BaseModuleContext) {
+	// Disable on eng builds for faster build.
+	if ctx.Config().Eng() {
+		afdo.Properties.Afdo = false
+	}
 }
 
 // afdoEnabled returns true for binaries and shared libraries
@@ -90,7 +88,7 @@ func (afdo *afdo) flags(ctx ModuleContext, flags Flags) Flags {
 	}
 	if path := afdo.Properties.FdoProfilePath; path != nil {
 		// The flags are prepended to allow overriding.
-		profileUseFlag := fmt.Sprintf(afdoCFlagsFormat, *path)
+		profileUseFlag := fmt.Sprintf(afdoFlagsFormat, *path)
 		flags.Local.CFlags = append([]string{profileUseFlag}, flags.Local.CFlags...)
 		flags.Local.LdFlags = append([]string{profileUseFlag, "-Wl,-mllvm,-no-warn-sample-unused=true"}, flags.Local.LdFlags...)
 

@@ -24,8 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"android/soong/aidl_library"
 	"android/soong/android"
-	"android/soong/bazel/cquery"
 )
 
 func init() {
@@ -39,31 +39,19 @@ func TestMain(m *testing.M) {
 var prepareForCcTest = android.GroupFixturePreparers(
 	PrepareForTestWithCcIncludeVndk,
 	android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
+		variables.VendorApiLevel = StringPtr("202404")
 		variables.DeviceVndkVersion = StringPtr("current")
-		variables.ProductVndkVersion = StringPtr("current")
 		variables.Platform_vndk_version = StringPtr("29")
 	}),
 )
 
-var ccLibInApex = "cc_lib_in_apex"
 var apexVariationName = "apex28"
 var apexVersion = "28"
 
 func registerTestMutators(ctx android.RegistrationContext) {
 	ctx.PostDepsMutators(func(ctx android.RegisterMutatorsContext) {
 		ctx.BottomUp("apex", testApexMutator).Parallel()
-		ctx.BottomUp("mixed_builds_prep", mixedBuildsPrepareMutator).Parallel()
 	})
-}
-
-func mixedBuildsPrepareMutator(ctx android.BottomUpMutatorContext) {
-	if m := ctx.Module(); m.Enabled() {
-		if mixedBuildMod, ok := m.(android.MixedBuildBuildable); ok {
-			if mixedBuildMod.IsMixedBuildSupported(ctx) && android.MixedBuildsEnabled(ctx) {
-				mixedBuildMod.QueueBazelCall(ctx)
-			}
-		}
-	}
 }
 
 func testApexMutator(mctx android.BottomUpMutatorContext) {
@@ -103,33 +91,6 @@ func testCc(t *testing.T, bp string) *android.TestContext {
 	return result.TestContext
 }
 
-// testCcNoVndk runs tests using the prepareForCcTest
-//
-// See testCc for an explanation as to how to stop using this deprecated method.
-//
-// deprecated
-func testCcNoVndk(t *testing.T, bp string) *android.TestContext {
-	t.Helper()
-	config := TestConfig(t.TempDir(), android.Android, nil, bp, nil)
-	config.TestProductVariables.Platform_vndk_version = StringPtr("29")
-
-	return testCcWithConfig(t, config)
-}
-
-// testCcNoProductVndk runs tests using the prepareForCcTest
-//
-// See testCc for an explanation as to how to stop using this deprecated method.
-//
-// deprecated
-func testCcNoProductVndk(t *testing.T, bp string) *android.TestContext {
-	t.Helper()
-	config := TestConfig(t.TempDir(), android.Android, nil, bp, nil)
-	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
-	config.TestProductVariables.Platform_vndk_version = StringPtr("29")
-
-	return testCcWithConfig(t, config)
-}
-
 // testCcErrorWithConfig runs tests using the prepareForCcTest
 //
 // See testCc for an explanation as to how to stop using this deprecated method.
@@ -166,7 +127,6 @@ func testCcErrorProductVndk(t *testing.T, pattern string, bp string) {
 	t.Helper()
 	config := TestConfig(t.TempDir(), android.Android, nil, bp, nil)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
-	config.TestProductVariables.ProductVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("29")
 	testCcErrorWithConfig(t, pattern, config)
 	return
@@ -370,9 +330,9 @@ func checkVndkModule(t *testing.T, ctx *android.TestContext, name, subDir string
 	}
 }
 
-func checkWriteFileOutput(t *testing.T, params android.TestingBuildParams, expected []string) {
+func checkWriteFileOutput(t *testing.T, ctx *android.TestContext, params android.TestingBuildParams, expected []string) {
 	t.Helper()
-	content := android.ContentFromFileRuleForTests(t, params)
+	content := android.ContentFromFileRuleForTests(t, ctx, params)
 	actual := strings.FieldsFunc(content, func(r rune) bool { return r == '\n' })
 	assertArrayString(t, actual, expected)
 }
@@ -380,7 +340,7 @@ func checkWriteFileOutput(t *testing.T, params android.TestingBuildParams, expec
 func checkVndkOutput(t *testing.T, ctx *android.TestContext, output string, expected []string) {
 	t.Helper()
 	vndkSnapshot := ctx.SingletonForTests("vndk-snapshot")
-	checkWriteFileOutput(t, vndkSnapshot.Output(output), expected)
+	checkWriteFileOutput(t, ctx, vndkSnapshot.Output(output), expected)
 }
 
 func checkVndkLibrariesOutput(t *testing.T, ctx *android.TestContext, module string, expected []string) {
@@ -523,7 +483,6 @@ func TestVndk(t *testing.T) {
 
 	config := TestConfig(t.TempDir(), android.Android, nil, bp, nil)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
-	config.TestProductVariables.ProductVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("29")
 
 	ctx := testCcWithConfig(t, config)
@@ -654,6 +613,7 @@ func TestVndkLibrariesTxtAndroidMk(t *testing.T) {
 	config := TestConfig(t.TempDir(), android.Android, nil, bp, nil)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("29")
+	config.TestProductVariables.KeepVndk = BoolPtr(true)
 	ctx := testCcWithConfig(t, config)
 
 	module := ctx.ModuleForTests("llndk.libraries.txt", "android_common")
@@ -706,6 +666,7 @@ func TestVndkUsingCoreVariant(t *testing.T) {
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("29")
 	config.TestProductVariables.VndkUseCoreVariant = BoolPtr(true)
+	config.TestProductVariables.KeepVndk = BoolPtr(true)
 
 	setVndkMustUseVendorVariantListForTest(config, []string{"libvndk"})
 
@@ -748,7 +709,7 @@ func TestDataLibs(t *testing.T) {
 		return
 	}
 	if len(testBinary.dataPaths()) != 1 {
-		t.Errorf("expected exactly one test data file. test data files: [%s]", testBinary.dataPaths())
+		t.Errorf("expected exactly one test data file. test data files: [%v]", testBinary.dataPaths())
 		return
 	}
 
@@ -805,7 +766,7 @@ func TestDataLibsRelativeInstallPath(t *testing.T) {
 		t.Fatalf("expected exactly one output file. output files: [%s]", outputFiles)
 	}
 	if len(testBinary.dataPaths()) != 2 {
-		t.Fatalf("expected exactly one test data file. test data files: [%s]", testBinary.dataPaths())
+		t.Fatalf("expected exactly one test data file. test data files: [%v]", testBinary.dataPaths())
 	}
 
 	outputPath := outputFiles[0].String()
@@ -886,63 +847,6 @@ func TestTestLibraryTestSuites(t *testing.T) {
 		t.Errorf("expected LOCAL_COMPATIBILITY_SUITE to be`suite_2`,"+
 			" but was '%s'", compatEntries[1])
 	}
-}
-
-func TestVndkWhenVndkVersionIsNotSet(t *testing.T) {
-	t.Parallel()
-	ctx := testCcNoVndk(t, `
-		cc_library {
-			name: "libvndk",
-			vendor_available: true,
-			product_available: true,
-			vndk: {
-				enabled: true,
-			},
-			nocrt: true,
-		}
-		cc_library {
-			name: "libvndk-private",
-			vendor_available: true,
-			product_available: true,
-			vndk: {
-				enabled: true,
-				private: true,
-			},
-			nocrt: true,
-		}
-
-		cc_library {
-			name: "libllndk",
-			llndk: {
-				symbol_file: "libllndk.map.txt",
-				export_llndk_headers: ["libllndk_headers"],
-			}
-		}
-
-		cc_library_headers {
-			name: "libllndk_headers",
-			llndk: {
-				symbol_file: "libllndk.map.txt",
-			},
-			export_include_dirs: ["include"],
-		}
-	`)
-
-	checkVndkOutput(t, ctx, "vndk/vndk.libraries.txt", []string{
-		"LLNDK: libc.so",
-		"LLNDK: libdl.so",
-		"LLNDK: libft2.so",
-		"LLNDK: libllndk.so",
-		"LLNDK: libm.so",
-		"VNDK-SP: libc++.so",
-		"VNDK-core: libvndk-private.so",
-		"VNDK-core: libvndk.so",
-		"VNDK-private: libft2.so",
-		"VNDK-private: libvndk-private.so",
-		"VNDK-product: libc++.so",
-		"VNDK-product: libvndk-private.so",
-		"VNDK-product: libvndk.so",
-	})
 }
 
 func TestVndkModuleError(t *testing.T) {
@@ -1110,6 +1014,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libnonvndk",
 			vendor_available: true,
+			product_available: true,
 			nocrt: true,
 		}
 	`)
@@ -1131,6 +1036,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libnonvndk",
 			vendor_available: true,
+			product_available: true,
 			nocrt: true,
 		}
 	`)
@@ -1152,6 +1058,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libnonvndk",
 			vendor_available: true,
+			product_available: true,
 			nocrt: true,
 		}
 	`)
@@ -1174,6 +1081,7 @@ func TestVndkDepError(t *testing.T) {
 		cc_library {
 			name: "libnonvndk",
 			vendor_available: true,
+			product_available: true,
 			nocrt: true,
 		}
 	`)
@@ -1389,6 +1297,7 @@ func TestCheckVndkMembershipBeforeDoubleLoadable(t *testing.T) {
 		cc_library {
 			name: "libanothervndksp",
 			vendor_available: true,
+			product_available: true,
 		}
 	`)
 }
@@ -1466,7 +1375,6 @@ func TestVndkExt(t *testing.T) {
 	`
 	config := TestConfig(t.TempDir(), android.Android, nil, bp, nil)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
-	config.TestProductVariables.ProductVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("29")
 
 	ctx := testCcWithConfig(t, config)
@@ -1479,70 +1387,6 @@ func TestVndkExt(t *testing.T) {
 
 	mod_product := ctx.ModuleForTests("libvndk2_ext_product", productVariant).Module().(*Module)
 	assertString(t, mod_product.outputFile.Path().Base(), "libvndk2-suffix.so")
-}
-
-func TestVndkExtWithoutBoardVndkVersion(t *testing.T) {
-	t.Parallel()
-	// This test checks the VNDK-Ext properties when BOARD_VNDK_VERSION is not set.
-	ctx := testCcNoVndk(t, `
-		cc_library {
-			name: "libvndk",
-			vendor_available: true,
-			product_available: true,
-			vndk: {
-				enabled: true,
-			},
-			nocrt: true,
-		}
-
-		cc_library {
-			name: "libvndk_ext",
-			vendor: true,
-			vndk: {
-				enabled: true,
-				extends: "libvndk",
-			},
-			nocrt: true,
-		}
-	`)
-
-	// Ensures that the core variant of "libvndk_ext" can be found.
-	mod := ctx.ModuleForTests("libvndk_ext", coreVariant).Module().(*Module)
-	if extends := mod.getVndkExtendsModuleName(); extends != "libvndk" {
-		t.Errorf("\"libvndk_ext\" must extend from \"libvndk\" but get %q", extends)
-	}
-}
-
-func TestVndkExtWithoutProductVndkVersion(t *testing.T) {
-	t.Parallel()
-	// This test checks the VNDK-Ext properties when PRODUCT_PRODUCT_VNDK_VERSION is not set.
-	ctx := testCcNoProductVndk(t, `
-		cc_library {
-			name: "libvndk",
-			vendor_available: true,
-			product_available: true,
-			vndk: {
-				enabled: true,
-			},
-			nocrt: true,
-		}
-
-		cc_library {
-			name: "libvndk_ext_product",
-			product_specific: true,
-			vndk: {
-				enabled: true,
-				extends: "libvndk",
-			},
-			nocrt: true,
-		}
-	`)
-
-	// Ensures that the core variant of "libvndk_ext_product" can be found.
-	mod := ctx.ModuleForTests("libvndk_ext_product", coreVariant).Module().(*Module)
-	if extends := mod.getVndkExtendsModuleName(); extends != "libvndk" {
-		t.Errorf("\"libvndk_ext_product\" must extend from \"libvndk\" but get %q", extends)
-	}
 }
 
 func TestVndkExtError(t *testing.T) {
@@ -1919,7 +1763,6 @@ func TestProductVndkExtDependency(t *testing.T) {
 	`
 	config := TestConfig(t.TempDir(), android.Android, nil, bp, nil)
 	config.TestProductVariables.DeviceVndkVersion = StringPtr("current")
-	config.TestProductVariables.ProductVndkVersion = StringPtr("current")
 	config.TestProductVariables.Platform_vndk_version = StringPtr("29")
 
 	testCcWithConfig(t, config)
@@ -2277,11 +2120,13 @@ func TestEnforceProductVndkVersion(t *testing.T) {
 	ensureStringContains(t, vendor_cflags, "-D__ANDROID_VNDK__")
 	ensureStringContains(t, vendor_cflags, "-D__ANDROID_VENDOR__")
 	ensureStringNotContains(t, vendor_cflags, "-D__ANDROID_PRODUCT__")
+	ensureStringContains(t, vendor_cflags, "-D__ANDROID_VENDOR_API__=202404")
 
 	product_cflags := product_static.Rule("cc").Args["cFlags"]
 	ensureStringContains(t, product_cflags, "-D__ANDROID_VNDK__")
 	ensureStringContains(t, product_cflags, "-D__ANDROID_PRODUCT__")
 	ensureStringNotContains(t, product_cflags, "-D__ANDROID_VENDOR__")
+	ensureStringNotContains(t, product_cflags, "-D__ANDROID_VENDOR_API__=202404")
 }
 
 func TestEnforceProductVndkVersionErrors(t *testing.T) {
@@ -2700,8 +2545,8 @@ func TestStaticLibDepReordering(t *testing.T) {
 
 	variant := "android_arm64_armv8-a_static"
 	moduleA := ctx.ModuleForTests("a", variant).Module().(*Module)
-	actual := ctx.ModuleProvider(moduleA, StaticLibraryInfoProvider).(StaticLibraryInfo).
-		TransitiveStaticLibrariesForOrdering.ToList().RelativeToTop()
+	actual := android.Paths(ctx.ModuleProvider(moduleA, StaticLibraryInfoProvider).(StaticLibraryInfo).
+		TransitiveStaticLibrariesForOrdering.ToList()).RelativeToTop()
 	expected := GetOutputPaths(ctx, variant, []string{"a", "c", "b", "d"})
 
 	if !reflect.DeepEqual(actual, expected) {
@@ -2736,8 +2581,8 @@ func TestStaticLibDepReorderingWithShared(t *testing.T) {
 
 	variant := "android_arm64_armv8-a_static"
 	moduleA := ctx.ModuleForTests("a", variant).Module().(*Module)
-	actual := ctx.ModuleProvider(moduleA, StaticLibraryInfoProvider).(StaticLibraryInfo).
-		TransitiveStaticLibrariesForOrdering.ToList().RelativeToTop()
+	actual := android.Paths(ctx.ModuleProvider(moduleA, StaticLibraryInfoProvider).(StaticLibraryInfo).
+		TransitiveStaticLibrariesForOrdering.ToList()).RelativeToTop()
 	expected := GetOutputPaths(ctx, variant, []string{"a", "c", "b"})
 
 	if !reflect.DeepEqual(actual, expected) {
@@ -3033,24 +2878,6 @@ func TestExcludeRuntimeLibs(t *testing.T) {
 	checkRuntimeLibs(t, nil, module)
 }
 
-func TestRuntimeLibsNoVndk(t *testing.T) {
-	t.Parallel()
-	ctx := testCcNoVndk(t, runtimeLibAndroidBp)
-
-	// If DeviceVndkVersion is not defined, then runtime_libs are copied as-is.
-
-	variant := "android_arm64_armv8-a_shared"
-
-	module := ctx.ModuleForTests("libvendor_available1", variant).Module().(*Module)
-	checkRuntimeLibs(t, []string{"liball_available"}, module)
-
-	module = ctx.ModuleForTests("libvendor2", variant).Module().(*Module)
-	checkRuntimeLibs(t, []string{"liball_available", "libvendor1", "libproduct_vendor"}, module)
-
-	module = ctx.ModuleForTests("libproduct2", variant).Module().(*Module)
-	checkRuntimeLibs(t, []string{"liball_available", "libproduct1", "libproduct_vendor"}, module)
-}
-
 func checkStaticLibs(t *testing.T, expected []string, module *Module) {
 	t.Helper()
 	actual := module.Properties.AndroidMkStaticLibs
@@ -3088,253 +2915,6 @@ func TestStaticLibDepExport(t *testing.T) {
 	module = ctx.ModuleForTests("lib2", variant).Module().(*Module)
 	// libc++_static is linked additionally.
 	checkStaticLibs(t, []string{"lib1", "libc++_static", "libc++demangle", "libclang_rt.builtins"}, module)
-}
-
-func TestLibDepAndroidMkExportInMixedBuilds(t *testing.T) {
-	bp := `
-		cc_library {
-			name: "static_dep",
-		}
-		cc_library {
-			name: "whole_static_dep",
-		}
-		cc_library {
-			name: "shared_dep",
-		}
-		cc_library {
-			name: "lib",
-			bazel_module: { label: "//:lib" },
-			static_libs: ["static_dep"],
-			whole_static_libs: ["whole_static_dep"],
-			shared_libs: ["shared_dep"],
-		}
-		cc_test {
-			name: "test",
-			bazel_module: { label: "//:test" },
-			static_libs: ["static_dep"],
-			whole_static_libs: ["whole_static_dep"],
-			shared_libs: ["shared_dep"],
-			gtest: false,
-		}
-		cc_binary {
-			name: "binary",
-			bazel_module: { label: "//:binary" },
-			static_libs: ["static_dep"],
-			whole_static_libs: ["whole_static_dep"],
-			shared_libs: ["shared_dep"],
-		}
-		cc_library_headers {
-			name: "lib_headers",
-			bazel_module: { label: "//:lib_headers" },
-			static_libs: ["static_dep"],
-			whole_static_libs: ["whole_static_dep"],
-			shared_libs: ["shared_dep"],
-		}
-		cc_prebuilt_library {
-			name: "lib_prebuilt",
-			bazel_module: { label: "//:lib_prebuilt" },
-			static_libs: ["static_dep"],
-			whole_static_libs: ["whole_static_dep"],
-			shared_libs: ["shared_dep"],
-		}
-	`
-
-	testCases := []struct {
-		name          string
-		moduleName    string
-		variant       string
-		androidMkInfo cquery.CcAndroidMkInfo
-	}{
-		{
-			name:       "shared lib",
-			moduleName: "lib",
-			variant:    "android_arm64_armv8-a_shared",
-			androidMkInfo: cquery.CcAndroidMkInfo{
-				LocalStaticLibs:      []string{"static_dep"},
-				LocalWholeStaticLibs: []string{"whole_static_dep"},
-				LocalSharedLibs:      []string{"shared_dep"},
-			},
-		},
-		{
-			name:       "static lib",
-			moduleName: "lib",
-			variant:    "android_arm64_armv8-a_static",
-			androidMkInfo: cquery.CcAndroidMkInfo{
-				LocalStaticLibs:      []string{"static_dep"},
-				LocalWholeStaticLibs: []string{"whole_static_dep"},
-				LocalSharedLibs:      []string{"shared_dep"},
-			},
-		},
-		{
-			name:       "cc_test arm64",
-			moduleName: "test",
-			variant:    "android_arm64_armv8-a",
-			androidMkInfo: cquery.CcAndroidMkInfo{
-				LocalStaticLibs:      []string{"static_dep"},
-				LocalWholeStaticLibs: []string{"whole_static_dep"},
-				LocalSharedLibs:      []string{"shared_dep"},
-			},
-		},
-		{
-			name:       "cc_test arm",
-			moduleName: "test",
-			variant:    "android_arm_armv7-a-neon",
-			androidMkInfo: cquery.CcAndroidMkInfo{
-				LocalStaticLibs:      []string{"static_dep"},
-				LocalWholeStaticLibs: []string{"whole_static_dep"},
-				LocalSharedLibs:      []string{"shared_dep"},
-			},
-		},
-		{
-			name:       "cc_binary",
-			moduleName: "binary",
-			variant:    "android_arm64_armv8-a",
-			androidMkInfo: cquery.CcAndroidMkInfo{
-				LocalStaticLibs:      []string{"static_dep"},
-				LocalWholeStaticLibs: []string{"whole_static_dep"},
-				LocalSharedLibs:      []string{"shared_dep"},
-			},
-		},
-		{
-			name:       "cc_library_headers",
-			moduleName: "lib_headers",
-			variant:    "android_arm64_armv8-a",
-			androidMkInfo: cquery.CcAndroidMkInfo{
-				LocalStaticLibs:      []string{"static_dep"},
-				LocalWholeStaticLibs: []string{"whole_static_dep"},
-				LocalSharedLibs:      []string{"shared_dep"},
-			},
-		},
-		{
-			name:       "prebuilt lib static",
-			moduleName: "lib_prebuilt",
-			variant:    "android_arm64_armv8-a_static",
-			androidMkInfo: cquery.CcAndroidMkInfo{
-				LocalStaticLibs:      []string{"static_dep"},
-				LocalWholeStaticLibs: []string{"whole_static_dep"},
-				LocalSharedLibs:      []string{"shared_dep"},
-			},
-		},
-		{
-			name:       "prebuilt lib shared",
-			moduleName: "lib_prebuilt",
-			variant:    "android_arm64_armv8-a_shared",
-			androidMkInfo: cquery.CcAndroidMkInfo{
-				LocalStaticLibs:      []string{"static_dep"},
-				LocalWholeStaticLibs: []string{"whole_static_dep"},
-				LocalSharedLibs:      []string{"shared_dep"},
-			},
-		},
-	}
-
-	outputBaseDir := "out/bazel"
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := android.GroupFixturePreparers(
-				prepareForCcTest,
-				android.FixtureModifyConfig(func(config android.Config) {
-					config.BazelContext = android.MockBazelContext{
-						OutputBaseDir: outputBaseDir,
-						LabelToCcInfo: map[string]cquery.CcInfo{
-							"//:lib": cquery.CcInfo{
-								CcAndroidMkInfo:      tc.androidMkInfo,
-								RootDynamicLibraries: []string{""},
-							},
-							"//:lib_bp2build_cc_library_static": cquery.CcInfo{
-								CcAndroidMkInfo:    tc.androidMkInfo,
-								RootStaticArchives: []string{""},
-							},
-							"//:lib_headers": cquery.CcInfo{
-								CcAndroidMkInfo: tc.androidMkInfo,
-								OutputFiles:     []string{""},
-							},
-							"//:lib_prebuilt": cquery.CcInfo{
-								CcAndroidMkInfo: tc.androidMkInfo,
-							},
-							"//:lib_prebuilt_bp2build_cc_library_static": cquery.CcInfo{
-								CcAndroidMkInfo: tc.androidMkInfo,
-							},
-						},
-						LabelToCcBinary: map[string]cquery.CcUnstrippedInfo{
-							"//:test": cquery.CcUnstrippedInfo{
-								CcAndroidMkInfo: tc.androidMkInfo,
-							},
-							"//:binary": cquery.CcUnstrippedInfo{
-								CcAndroidMkInfo: tc.androidMkInfo,
-							},
-						},
-					}
-				}),
-			).RunTestWithBp(t, bp)
-			ctx := result.TestContext
-
-			module := ctx.ModuleForTests(tc.moduleName, tc.variant).Module().(*Module)
-			entries := android.AndroidMkEntriesForTest(t, ctx, module)[0]
-			if !reflect.DeepEqual(module.Properties.AndroidMkStaticLibs, tc.androidMkInfo.LocalStaticLibs) {
-				t.Errorf("incorrect static_libs"+
-					"\nactual:   %v"+
-					"\nexpected: %v",
-					module.Properties.AndroidMkStaticLibs,
-					tc.androidMkInfo.LocalStaticLibs,
-				)
-			}
-			staticDepsDiffer, missingStaticDeps, additionalStaticDeps := android.ListSetDifference(
-				entries.EntryMap["LOCAL_STATIC_LIBRARIES"],
-				tc.androidMkInfo.LocalStaticLibs,
-			)
-			if staticDepsDiffer {
-				t.Errorf(
-					"expected LOCAL_STATIC_LIBRARIES to be %q but was %q; missing: %q; extra %q",
-					tc.androidMkInfo.LocalStaticLibs,
-					entries.EntryMap["LOCAL_STATIC_LIBRARIES"],
-					missingStaticDeps,
-					additionalStaticDeps,
-				)
-			}
-
-			if !reflect.DeepEqual(module.Properties.AndroidMkWholeStaticLibs, tc.androidMkInfo.LocalWholeStaticLibs) {
-				t.Errorf("expected module.Properties.AndroidMkWholeStaticLibs to be %q, but was %q",
-					tc.androidMkInfo.LocalWholeStaticLibs,
-					module.Properties.AndroidMkWholeStaticLibs,
-				)
-			}
-			wholeStaticDepsDiffer, missingWholeStaticDeps, additionalWholeStaticDeps := android.ListSetDifference(
-				entries.EntryMap["LOCAL_WHOLE_STATIC_LIBRARIES"],
-				tc.androidMkInfo.LocalWholeStaticLibs,
-			)
-			if wholeStaticDepsDiffer {
-				t.Errorf(
-					"expected LOCAL_WHOLE_STATIC_LIBRARIES to be %q but was %q; missing: %q; extra %q",
-					tc.androidMkInfo.LocalWholeStaticLibs,
-					entries.EntryMap["LOCAL_WHOLE_STATIC_LIBRARIES"],
-					missingWholeStaticDeps,
-					additionalWholeStaticDeps,
-				)
-			}
-
-			if !reflect.DeepEqual(module.Properties.AndroidMkSharedLibs, tc.androidMkInfo.LocalSharedLibs) {
-				t.Errorf("incorrect shared_libs"+
-					"\nactual:   %v"+
-					"\nexpected: %v",
-					module.Properties.AndroidMkSharedLibs,
-					tc.androidMkInfo.LocalSharedLibs,
-				)
-			}
-			sharedDepsDiffer, missingSharedDeps, additionalSharedDeps := android.ListSetDifference(
-				entries.EntryMap["LOCAL_SHARED_LIBRARIES"],
-				tc.androidMkInfo.LocalSharedLibs,
-			)
-			if sharedDepsDiffer {
-				t.Errorf(
-					"expected LOCAL_SHARED_LIBRARIES to be %q but was %q; missing %q; extra %q",
-					tc.androidMkInfo.LocalSharedLibs,
-					entries.EntryMap["LOCAL_SHARED_LIBRARIES"],
-					missingSharedDeps,
-					additionalSharedDeps,
-				)
-			}
-		})
-	}
 }
 
 var compilerFlagsTestCases = []struct {
@@ -3526,7 +3106,7 @@ func TestDataLibsPrebuiltSharedTestLibrary(t *testing.T) {
 		t.Errorf("expected exactly one output file. output files: [%s]", outputFiles)
 	}
 	if len(testBinary.dataPaths()) != 1 {
-		t.Errorf("expected exactly one test data file. test data files: [%s]", testBinary.dataPaths())
+		t.Errorf("expected exactly one test data file. test data files: [%v]", testBinary.dataPaths())
 	}
 
 	outputPath := outputFiles[0].String()
@@ -3609,9 +3189,6 @@ func TestVersionedStubs(t *testing.T) {
 }
 
 func TestStubsForLibraryInMultipleApexes(t *testing.T) {
-	// TODO(b/275313114): Test exposes non-determinism which should be corrected and the test
-	// reenabled.
-	t.Skip()
 	t.Parallel()
 	ctx := testCc(t, `
 		cc_library_shared {
@@ -3707,133 +3284,6 @@ func TestStubsForLibraryInMultipleApexes(t *testing.T) {
 	}
 
 	libFooStubPath := "libFoo/android_arm64_armv8-a_shared_current/libFoo.so"
-	for _, lib := range linkAgainstFooStubs {
-		libLinkRule := ctx.ModuleForTests(lib, "android_arm64_armv8-a_shared").Rule("ld")
-		libFlags := libLinkRule.Args["libFlags"]
-		if !strings.Contains(libFlags, libFooStubPath) {
-			t.Errorf("%q: %q is not found in %q", lib, libFooStubPath, libFlags)
-		}
-	}
-}
-
-func TestMixedBuildUsesStubs(t *testing.T) {
-	// TODO(b/275313114): Test exposes non-determinism which should be corrected and the test
-	// reenabled.
-	t.Skip()
-	t.Parallel()
-	bp := `
-		cc_library_shared {
-			name: "libFoo",
-			bazel_module: { label: "//:libFoo" },
-			srcs: ["foo.c"],
-			stubs: {
-				symbol_file: "foo.map.txt",
-				versions: ["current"],
-			},
-			apex_available: ["bar", "a1"],
-		}
-
-		cc_library_shared {
-			name: "libBar",
-			srcs: ["bar.c"],
-			shared_libs: ["libFoo"],
-			apex_available: ["a1"],
-		}
-
-		cc_library_shared {
-			name: "libA1",
-			srcs: ["a1.c"],
-			shared_libs: ["libFoo"],
-			apex_available: ["a1"],
-		}
-
-		cc_library_shared {
-			name: "libBarA1",
-			srcs: ["bara1.c"],
-			shared_libs: ["libFoo"],
-			apex_available: ["bar", "a1"],
-		}
-
-		cc_library_shared {
-			name: "libAnyApex",
-			srcs: ["anyApex.c"],
-			shared_libs: ["libFoo"],
-			apex_available: ["//apex_available:anyapex"],
-		}
-
-		cc_library_shared {
-			name: "libBaz",
-			srcs: ["baz.c"],
-			shared_libs: ["libFoo"],
-			apex_available: ["baz"],
-		}
-
-		cc_library_shared {
-			name: "libQux",
-			srcs: ["qux.c"],
-			shared_libs: ["libFoo"],
-			apex_available: ["qux", "bar"],
-		}`
-
-	result := android.GroupFixturePreparers(
-		prepareForCcTest,
-		android.FixtureModifyConfig(func(config android.Config) {
-			config.BazelContext = android.MockBazelContext{
-				OutputBaseDir: "out/bazel",
-				LabelToCcInfo: map[string]cquery.CcInfo{
-					"//:libFoo": {
-						RootDynamicLibraries: []string{"libFoo.so"},
-					},
-					"//:libFoo_stub_libs-current": {
-						RootDynamicLibraries: []string{"libFoo_stub_libs-current.so"},
-					},
-				},
-			}
-		}),
-	).RunTestWithBp(t, bp)
-	ctx := result.TestContext
-
-	variants := ctx.ModuleVariantsForTests("libFoo")
-	expectedVariants := []string{
-		"android_arm64_armv8-a_shared",
-		"android_arm64_armv8-a_shared_current",
-		"android_arm_armv7-a-neon_shared",
-		"android_arm_armv7-a-neon_shared_current",
-	}
-	variantsMismatch := false
-	if len(variants) != len(expectedVariants) {
-		variantsMismatch = true
-	} else {
-		for _, v := range expectedVariants {
-			if !inList(v, variants) {
-				variantsMismatch = false
-			}
-		}
-	}
-	if variantsMismatch {
-		t.Errorf("variants of libFoo expected:\n")
-		for _, v := range expectedVariants {
-			t.Errorf("%q\n", v)
-		}
-		t.Errorf(", but got:\n")
-		for _, v := range variants {
-			t.Errorf("%q\n", v)
-		}
-	}
-
-	linkAgainstFoo := []string{"libBarA1"}
-	linkAgainstFooStubs := []string{"libBar", "libA1", "libBaz", "libQux", "libAnyApex"}
-
-	libFooPath := "out/bazel/execroot/__main__/libFoo.so"
-	for _, lib := range linkAgainstFoo {
-		libLinkRule := ctx.ModuleForTests(lib, "android_arm64_armv8-a_shared").Rule("ld")
-		libFlags := libLinkRule.Args["libFlags"]
-		if !strings.Contains(libFlags, libFooPath) {
-			t.Errorf("%q: %q is not found in %q", lib, libFooPath, libFlags)
-		}
-	}
-
-	libFooStubPath := "out/bazel/execroot/__main__/libFoo_stub_libs-current.so"
 	for _, lib := range linkAgainstFooStubs {
 		libLinkRule := ctx.ModuleForTests(lib, "android_arm64_armv8-a_shared").Rule("ld")
 		libFlags := libLinkRule.Args["libFlags"]
@@ -4216,9 +3666,6 @@ func TestDefaults(t *testing.T) {
 			shared: {
 				srcs: ["baz.c"],
 			},
-			bazel_module: {
-				bp2build_available: true,
-			},
 		}
 
 		cc_library_static {
@@ -4455,9 +3902,80 @@ func TestStubsLibReexportsHeaders(t *testing.T) {
 	}
 }
 
+func TestAidlLibraryWithHeaders(t *testing.T) {
+	t.Parallel()
+	ctx := android.GroupFixturePreparers(
+		prepareForCcTest,
+		aidl_library.PrepareForTestWithAidlLibrary,
+		android.MockFS{
+			"package_bar/Android.bp": []byte(`
+			aidl_library {
+				name: "bar",
+				srcs: ["x/y/Bar.aidl"],
+				hdrs: ["x/HeaderBar.aidl"],
+				strip_import_prefix: "x",
+			}
+			`)}.AddToFixture(),
+		android.MockFS{
+			"package_foo/Android.bp": []byte(`
+			aidl_library {
+				name: "foo",
+				srcs: ["a/b/Foo.aidl"],
+				hdrs: ["a/HeaderFoo.aidl"],
+				strip_import_prefix: "a",
+				deps: ["bar"],
+			}
+			cc_library {
+				name: "libfoo",
+				aidl: {
+					libs: ["foo"],
+				}
+			}
+			`),
+		}.AddToFixture(),
+	).RunTest(t).TestContext
+
+	libfoo := ctx.ModuleForTests("libfoo", "android_arm64_armv8-a_static")
+
+	android.AssertPathsRelativeToTopEquals(
+		t,
+		"aidl headers",
+		[]string{
+			"package_bar/x/HeaderBar.aidl",
+			"package_foo/a/HeaderFoo.aidl",
+			"package_foo/a/b/Foo.aidl",
+			"out/soong/.intermediates/package_foo/libfoo/android_arm64_armv8-a_static/gen/aidl_library.sbox.textproto",
+		},
+		libfoo.Rule("aidl_library").Implicits,
+	)
+
+	manifest := android.RuleBuilderSboxProtoForTests(t, ctx, libfoo.Output("aidl_library.sbox.textproto"))
+	aidlCommand := manifest.Commands[0].GetCommand()
+
+	expectedAidlFlags := "-Ipackage_foo/a -Ipackage_bar/x"
+	if !strings.Contains(aidlCommand, expectedAidlFlags) {
+		t.Errorf("aidl command %q does not contain %q", aidlCommand, expectedAidlFlags)
+	}
+
+	outputs := strings.Join(libfoo.AllOutputs(), " ")
+
+	android.AssertStringDoesContain(t, "aidl-generated header", outputs, "gen/aidl_library/b/BpFoo.h")
+	android.AssertStringDoesContain(t, "aidl-generated header", outputs, "gen/aidl_library/b/BnFoo.h")
+	android.AssertStringDoesContain(t, "aidl-generated header", outputs, "gen/aidl_library/b/Foo.h")
+	android.AssertStringDoesContain(t, "aidl-generated cpp", outputs, "b/Foo.cpp")
+	// Confirm that the aidl header doesn't get compiled to cpp and h files
+	android.AssertStringDoesNotContain(t, "aidl-generated header", outputs, "gen/aidl_library/y/BpBar.h")
+	android.AssertStringDoesNotContain(t, "aidl-generated header", outputs, "gen/aidl_library/y/BnBar.h")
+	android.AssertStringDoesNotContain(t, "aidl-generated header", outputs, "gen/aidl_library/y/Bar.h")
+	android.AssertStringDoesNotContain(t, "aidl-generated cpp", outputs, "y/Bar.cpp")
+}
+
 func TestAidlFlagsPassedToTheAidlCompiler(t *testing.T) {
 	t.Parallel()
-	ctx := testCc(t, `
+	ctx := android.GroupFixturePreparers(
+		prepareForCcTest,
+		aidl_library.PrepareForTestWithAidlLibrary,
+	).RunTestWithBp(t, `
 		cc_library {
 			name: "libfoo",
 			srcs: ["a/Foo.aidl"],
@@ -4466,7 +3984,7 @@ func TestAidlFlagsPassedToTheAidlCompiler(t *testing.T) {
 	`)
 
 	libfoo := ctx.ModuleForTests("libfoo", "android_arm64_armv8-a_static")
-	manifest := android.RuleBuilderSboxProtoForTests(t, libfoo.Output("aidl.sbox.textproto"))
+	manifest := android.RuleBuilderSboxProtoForTests(t, ctx.TestContext, libfoo.Output("aidl.sbox.textproto"))
 	aidlCommand := manifest.Commands[0].GetCommand()
 	expectedAidlFlag := "-Werror"
 	if !strings.Contains(aidlCommand, expectedAidlFlag) {
@@ -4517,12 +4035,61 @@ func TestAidlFlagsWithMinSdkVersion(t *testing.T) {
 				}
 			`)
 			libfoo := ctx.ModuleForTests("libfoo", tc.variant)
-			manifest := android.RuleBuilderSboxProtoForTests(t, libfoo.Output("aidl.sbox.textproto"))
+			manifest := android.RuleBuilderSboxProtoForTests(t, ctx, libfoo.Output("aidl.sbox.textproto"))
 			aidlCommand := manifest.Commands[0].GetCommand()
 			expectedAidlFlag := "--min_sdk_version=" + tc.expected
 			if !strings.Contains(aidlCommand, expectedAidlFlag) {
 				t.Errorf("aidl command %q does not contain %q", aidlCommand, expectedAidlFlag)
 			}
+		})
+	}
+}
+
+func TestInvalidAidlProp(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		description string
+		bp          string
+	}{
+		{
+			description: "Invalid use of aidl.libs and aidl.include_dirs",
+			bp: `
+			cc_library {
+				name: "foo",
+				aidl: {
+					libs: ["foo_aidl"],
+					include_dirs: ["bar/include"],
+				}
+			}
+			`,
+		},
+		{
+			description: "Invalid use of aidl.libs and aidl.local_include_dirs",
+			bp: `
+			cc_library {
+				name: "foo",
+				aidl: {
+					libs: ["foo_aidl"],
+					local_include_dirs: ["include"],
+				}
+			}
+			`,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.description, func(t *testing.T) {
+			bp := `
+			aidl_library {
+				name: "foo_aidl",
+				srcs: ["Foo.aidl"],
+			} ` + testCase.bp
+			android.GroupFixturePreparers(
+				prepareForCcTest,
+				aidl_library.PrepareForTestWithAidlLibrary.
+					ExtendWithErrorHandler(android.FixtureExpectsOneErrorPattern("For aidl headers, please only use aidl.libs prop")),
+			).RunTestWithBp(t, bp)
 		})
 	}
 }
@@ -4742,7 +4309,15 @@ func TestIncludeDirsExporting(t *testing.T) {
 	})
 
 	t.Run("ensure only aidl headers are exported", func(t *testing.T) {
-		ctx := testCc(t, genRuleModules+`
+		ctx := android.GroupFixturePreparers(
+			prepareForCcTest,
+			aidl_library.PrepareForTestWithAidlLibrary,
+		).RunTestWithBp(t, `
+		aidl_library {
+			name: "libfoo_aidl",
+			srcs: ["x/y/Bar.aidl"],
+			strip_import_prefix: "x",
+		}
 		cc_library_shared {
 			name: "libfoo",
 			srcs: [
@@ -4751,25 +4326,33 @@ func TestIncludeDirsExporting(t *testing.T) {
 				"a.proto",
 			],
 			aidl: {
+				libs: ["libfoo_aidl"],
 				export_aidl_headers: true,
 			}
 		}
-		`)
+		`).TestContext
 		foo := ctx.ModuleForTests("libfoo", "android_arm64_armv8-a_shared").Module()
 		checkIncludeDirs(t, ctx, foo,
 			expectedIncludeDirs(`
 				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl
+				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl_library
 			`),
 			expectedSystemIncludeDirs(``),
 			expectedGeneratedHeaders(`
 				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl/b.h
 				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl/Bnb.h
 				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl/Bpb.h
+				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl_library/y/Bar.h
+				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl_library/y/BnBar.h
+				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl_library/y/BpBar.h
 			`),
 			expectedOrderOnlyDeps(`
 				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl/b.h
 				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl/Bnb.h
 				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl/Bpb.h
+				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl_library/y/Bar.h
+				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl_library/y/BnBar.h
+				.intermediates/libfoo/android_arm64_armv8-a_shared/gen/aidl_library/y/BpBar.h
 			`),
 		)
 	})
@@ -4881,8 +4464,8 @@ func TestIncludeDirectoryOrdering(t *testing.T) {
 	cppOnly := []string{"-fPIC", "${config.CommonGlobalCppflags}", "${config.DeviceGlobalCppflags}", "${config.ArmCppflags}"}
 
 	cflags := []string{"-Werror", "-std=candcpp"}
-	cstd := []string{"-std=gnu11", "-std=conly"}
-	cppstd := []string{"-std=gnu++17", "-std=cpp", "-fno-rtti"}
+	cstd := []string{"-std=gnu17", "-std=conly"}
+	cppstd := []string{"-std=gnu++20", "-std=cpp", "-fno-rtti"}
 
 	lastIncludes := []string{
 		"out/soong/ndk/sysroot/usr/include",
@@ -5163,55 +4746,28 @@ func TestCcBuildBrokenClangCFlags(t *testing.T) {
 	}
 }
 
-func TestDclaLibraryInApex(t *testing.T) {
+func TestStrippedAllOutputFile(t *testing.T) {
 	t.Parallel()
 	bp := `
-	cc_library_shared {
-		name: "cc_lib_in_apex",
-		srcs: ["foo.cc"],
-    apex_available: ["myapex"],
-		bazel_module: { label: "//foo/bar:bar" },
-	}`
-	label := "//foo/bar:bar"
-	arch64 := "arm64_armv8-a"
-	arch32 := "arm_armv7-a-neon"
-	apexCfgKey := android.ApexConfigKey{
-		WithinApex:     true,
-		ApexSdkVersion: "28",
-	}
-
-	result := android.GroupFixturePreparers(
-		prepareForCcTest,
-		android.FixtureRegisterWithContext(registerTestMutators),
-		android.FixtureModifyConfig(func(config android.Config) {
-			config.BazelContext = android.MockBazelContext{
-				OutputBaseDir: "outputbase",
-				LabelToCcInfo: map[string]cquery.CcInfo{
-					android.BuildMockBazelContextResultKey(label, arch32, android.Android, apexCfgKey): cquery.CcInfo{
-						RootDynamicLibraries: []string{"foo.so"},
-					},
-					android.BuildMockBazelContextResultKey(label, arch64, android.Android, apexCfgKey): cquery.CcInfo{
-						RootDynamicLibraries: []string{"foo.so"},
-					},
-				},
-				BazelRequests: make(map[string]bool),
+		cc_library {
+			name: "test_lib",
+			srcs: ["test_lib.cpp"],
+			dist: {
+				targets: [ "dist_target" ],
+				tag: "stripped_all",
 			}
-		}),
-	).RunTestWithBp(t, bp)
-	ctx := result.TestContext
-
-	// Test if the bazel request is queued correctly
-	key := android.BuildMockBazelContextRequestKey(label, cquery.GetCcInfo, arch32, android.Android, apexCfgKey)
-	if !ctx.Config().BazelContext.(android.MockBazelContext).BazelRequests[key] {
-		t.Errorf("Bazel request was not queued: %s", key)
-	}
-
-	sharedFoo := ctx.ModuleForTests(ccLibInApex, "android_arm_armv7-a-neon_shared_"+apexVariationName).Module()
-	producer := sharedFoo.(android.OutputFileProducer)
-	outputFiles, err := producer.OutputFiles("")
+		}
+ `
+	config := TestConfig(t.TempDir(), android.Android, nil, bp, nil)
+	ctx := testCcWithConfig(t, config)
+	module := ctx.ModuleForTests("test_lib", "android_arm_armv7-a-neon_shared").Module()
+	outputFile, err := module.(android.OutputFileProducer).OutputFiles("stripped_all")
 	if err != nil {
-		t.Errorf("Unexpected error getting cc_object outputfiles %s", err)
+		t.Errorf("Expected cc_library to produce output files, error: %s", err)
+		return
 	}
-	expectedOutputFiles := []string{"outputbase/execroot/__main__/foo.so"}
-	android.AssertDeepEquals(t, "output files", expectedOutputFiles, outputFiles.Strings())
+	if !strings.HasSuffix(outputFile.Strings()[0], "/stripped_all/test_lib.so") {
+		t.Errorf("Unexpected output file: %s", outputFile.Strings()[0])
+		return
+	}
 }
